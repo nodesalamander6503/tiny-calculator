@@ -1,8 +1,9 @@
 #define VERSION "v1.0"
 
+#include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 
@@ -20,21 +21,47 @@ struct sexpr {
 	} data;
 };
 
+enum fn_t {
+	t_fold,
+	t_bin,
+	t_unary,
+};
 struct function {
 	const char * name;
-	float(*fn)(float, float);
+	enum fn_t t;
+	union {
+		float(*fold)(float, float);
+		float(*bin)(float, float);
+		float(*unary)(float);
+	} fn;
 };
 float fn_add(float x, float y) { return x + y; }
 float fn_sub(float x, float y) { return x - y; }
 float fn_mul(float x, float y) { return x * y; }
 float fn_div(float x, float y) { return x / y; }
+float fn_fv(float i, float n) { return pow(1 + i, n); }
+float fn_pv(float i, float n) { return pow(1 + i, -n); }
+float fn_ai(float i, float n) { return (1 - pow(1 + i, -n)) / i; }
+float fn_ad(float i, float n) { return ((1 - pow(1 + i, -n)) / i) * (1 + i); }
+float fn_si(float i, float n) { return (pow(1 + i, n) - 1) / i; }
+float fn_sd(float i, float n) { return ((pow(1 + i, n) - 1) / i) * (1 + i); }
+float fn_perp(float i) { return 1 / i; }
 struct function functions[] = {
-	{"add", fn_add},
-	{"sub", fn_sub},
-	{"mul", fn_mul},
-	{"div", fn_div},
+	{"add", t_fold, {.fold = fn_add}},
+	{"sub", t_fold, {.fold = fn_sub}},
+	{"mul", t_fold, {.fold = fn_mul}},
+	{"div", t_fold, {.fold = fn_div}},
 
-	{NULL, NULL} // sentinel
+	{"fv", t_bin, {.bin = fn_fv}},
+	{"pv", t_bin, {.bin = fn_pv}},
+	{"ai", t_bin, {.bin = fn_ai}},
+	{"ad", t_bin, {.bin = fn_ad}},
+	{"si", t_bin, {.bin = fn_si}},
+	{"sd", t_bin, {.bin = fn_sd}},
+
+	{"perp", t_unary, {.unary = fn_perp}},
+
+	{NULL, 0, NULL} // sentinel
 };
 
 bool faststrneq(const char * x, const char * y) {
@@ -44,9 +71,6 @@ bool faststrneq(const char * x, const char * y) {
 }
 
 struct sexpr * eval_sexpr(struct sexpr * s) {
-	// note that it does not free
-	// this is because we assume that the cost of freeing is too much
-	// we want speed, and we already malloc'd like crazy anyways
 	if(!(s->is_call)) {
 		return s;
 	}
@@ -59,30 +83,30 @@ struct sexpr * eval_sexpr(struct sexpr * s) {
 	float n = 0;
 	for(int i = 0; functions[i].name; i ++) {
 		if(faststrneq(s->data.call.name, functions[i].name)) { continue; }
-		n = s->data.call.args[0]->data.num;
-		for(int j = 1; j < s->data.call.num_args; j ++) {
-			n = functions[i].fn(n, s->data.call.args[j]->data.num);
+		if(functions[i].t == t_fold) {
+			n = s->data.call.args[0]->data.num;
+			for(int j = 1; j < s->data.call.num_args; j ++) {
+				n = functions[i].fn.fold(n, s->data.call.args[j]->data.num);
+			}
+		} else if(functions[i].t == t_bin) {
+			if(s->data.call.num_args != 2) { error("the function %s expects exactly 2 arguments", s->data.call.name); }
+			n = functions[i].fn.bin(s->data.call.args[0]->data.num, s->data.call.args[1]->data.num);
+		} else if(functions[i].t == t_unary) {
+			if(s->data.call.num_args != 1) { error("the function %s expects exactly 1 argument", s->data.call.name); }
+			n = functions[i].fn.unary(s->data.call.args[0]->data.num);
+		} else {
+			error("implementation bug: the code used to implement the function %s was malformed", s->data.call.name);
 		}
 		goto solved;
 	}
 	error("could not find instruction %s", s->data.call.name);
 solved:
-	s->is_call = 0;
-	s->data.num = n;
-	return s;
-	if(!strcmp(s->data.call.name, "add")) {
-		n = 0;
-		for(int i = 0; i < s->data.call.num_args; i ++) {
-			n += s->data.call.args[i]->data.num;
-		}
-	} else if(!strcmp(s->data.call.name, "sub")) {
-		n = s->data.call.args[0]->data.num;
-		for(int i = 1; i < s->data.call.num_args; i ++) {
-			n -= s->data.call.args[i]->data.num;
-		}
-	} else {
-		error("unrecognized instruction %s", s->data.call.name);
+	// first, free everything rlly quick
+	for(int j = 1; j < s->data.call.num_args; j ++) {
+		free(s->data.call.args[j]);
 	}
+	free(s->data.call.args);
+	// now actually return value
 	s->is_call = 0;
 	s->data.num = n;
 	return s;
